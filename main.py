@@ -10,6 +10,7 @@ import os
 import re
 from datetime import datetime, timezone, timedelta
 from youtube_transcript_api import YouTubeTranscriptApi
+from bs4 import BeautifulSoup
 
 # Импортируем ключи и прокси из секретного файла
 from sacred_data import TG_TOKEN, GEMINI_API_KEY, TAVILY_API_KEY, PROXY_URL 
@@ -38,6 +39,26 @@ MODEL_ID = 'gemini-3.1-flash-lite-preview'
 
 bot = telebot.TeleBot(TG_TOKEN)
 user_chats = {}
+
+def get_site_content(url):
+    """Выкачивает текст из статьи по прямой ссылке"""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return None
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        # Убираем лишнее: скрипты, стили, навигацию
+        for script in soup(["script", "style", "nav", "header", "footer"]):
+            script.extract()
+            
+        # Берем основной текст
+        text = soup.get_text(separator=' ', strip=True)
+        return text[:15000] # Берем первые 15к символов, чтобы не перегружать контекст
+    except Exception as e:
+        logging.error(f"Ошибка парсинга сайта: {e}")
+        return None
 
 def search_internet(query):
     """Поиск через Tavily API"""
@@ -153,8 +174,7 @@ def handle_message(message):
             user_text = message.text
             context = ""
             
-            # --- ЛОГИКА ДЛЯ YOUTUBE ---
-           # --- ЛОГИКА ДЛЯ YOUTUBE ---
+            
             if "youtube.com" in user_text.lower() or "youtu.be" in user_text.lower():
                 bot.send_message(message.chat.id, "🎬 Вижу ссылку на YouTube! Изучаю видео, дай мне пару секунд...")
                 transcript = get_youtube_transcript(user_text)
@@ -166,7 +186,21 @@ def handle_message(message):
                     # ВАЖНО: Если субтитров нет, бот сам пишет сообщение и прерывает работу!
                     bot.send_message(message.chat.id, "❌ Я не смог скачать субтитры этого видео. Скорее всего, YouTube заблокировал запрос с сервера (защита от ботов) или у видео вообще нет текста.")
                     return  # <-- Эта команда полностью останавливает дальнейшую обработку сообщения
-            
+            # --- 2. ЛОГИКА ДЛЯ ОБЫЧНЫХ ССЫЛОК (СТАТЬИ) ---
+            elif "http" in user_text.lower():
+                # Вытаскиваем саму ссылку из сообщения
+                url_match = re.search(r'(https?://[^\s]+)', user_text)
+                if url_match:
+                    url = url_match.group(1)
+                    bot.send_message(message.chat.id, "📖 Вижу ссылку! Читаю содержимое страницы...")
+                    site_text = get_site_content(url)
+                    
+                    if site_text:
+                        context = f"[СОДЕРЖИМОЕ СТРАНИЦЫ]: {site_text}\n\n"
+                        user_text = f"Опираясь на текст страницы, выполни запрос: {user_text}. Если просьбы нет, сделай краткую выжимку."
+                    else:
+                        # Если не смогли спарсить сайт напрямую, пробуем хотя бы найти инфу через Tavily
+                        context = search_internet(user_text)
             # --- ЛОГИКА ДЛЯ ПОИСКА (Если это не YouTube) ---
             else:
                 triggers = ['?', 'курс', 'погода', 'сколько', 'акции', 'новости', 'что сейчас', 'какой', 'какая']
