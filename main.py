@@ -68,19 +68,32 @@ def search_internet(query):
         return ""
 
 def get_youtube_transcript(url):
-    """Извлекает текст из видео на YouTube"""
+    """Извлекает текст из видео на YouTube (берет автоматические и переводит чужие)"""
     try:
-        # Ищем ID видео в ссылке (работает с youtube.com и youtu.be)
-        match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
+        # Ищем ID видео в ссылке
+        match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", url)
         if not match:
             return None
         video_id = match.group(1)
 
-        # Пытаемся получить русские или английские субтитры
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ru', 'en'])
+        # Получаем список ВСЕХ доступных субтитров к видео
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         
-        # Склеиваем всё в один огромный текст
-        text = " ".join([t['text'] for t in transcript_list])
+        try:
+            # Попытка 1: Ищем нормальные ручные или автоматические на русском
+            t = transcript_list.find_transcript(['ru', 'ru-RU'])
+        except:
+            try:
+                # Попытка 2: Ищем на английском и переводим на русский
+                t = transcript_list.find_transcript(['en']).translate('ru')
+            except:
+                # Попытка 3: Берем ВООБЩЕ ПЕРВЫЕ попавшиеся субтитры (любой язык) и переводим на русский
+                t = list(transcript_list)[0].translate('ru')
+                
+        # Скачиваем текст
+        transcript_data = t.fetch()
+        text = " ".join([chunk['text'] for chunk in transcript_data])
+        
         return text
     except Exception as e:
         logging.error(f"Ошибка YouTube: {e}")
@@ -221,7 +234,7 @@ def handle_message(message):
             bot.send_message(message.chat.id, "Я перегрелся. Подожди немного!")
         else:
             logging.error(f"Ошибка в handle_message: {e}")
-            bot.send_message(message.chat.id, "Произошла ошибка, но я скоро поправлюсь!")
+            bot.send_message(message.cghat.id, "Произошла ошибка, но я скоро поправлюсь!")
 
 print("Бот запущен (YouTube + SDK + HTML + Файлы)...")
 bot.infinity_polling()
