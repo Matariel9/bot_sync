@@ -9,6 +9,7 @@ import requests
 import os
 import re
 from datetime import datetime, timezone, timedelta
+from youtube_transcript_api import YouTubeTranscriptApi
 
 # Импортируем ключи и прокси из секретного файла
 from sacred_data import TG_TOKEN, GEMINI_API_KEY, TAVILY_API_KEY, PROXY_URL 
@@ -66,6 +67,25 @@ def search_internet(query):
         logging.error(f"Сбой подключения к Tavily: {e}")
         return ""
 
+def get_youtube_transcript(url):
+    """Извлекает текст из видео на YouTube"""
+    try:
+        # Ищем ID видео в ссылке (работает с youtube.com и youtu.be)
+        match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
+        if not match:
+            return None
+        video_id = match.group(1)
+
+        # Пытаемся получить русские или английские субтитры
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ru', 'en'])
+        
+        # Склеиваем всё в один огромный текст
+        text = " ".join([t['text'] for t in transcript_list])
+        return text
+    except Exception as e:
+        logging.error(f"Ошибка YouTube: {e}")
+        return None
+
 def format_for_telegram(text):
     """Шлюз-переводчик: чистит Markdown от ИИ и делает безопасный HTML"""
     text = re.sub(r'```(\w*)\n(.*?)\n```', r'<pre><code class="\1">\2</code></pre>', text, flags=re.DOTALL)
@@ -95,7 +115,6 @@ def reset_chat(message):
     user_id = message.from_user.id
     if user_id not in ALLOWED_USERS: return
     
-    # Принудительно пересоздаем чат
     config = genai_types.GenerateContentConfig(system_instruction=family_rules)
     user_chats[user_id] = client.chats.create(model=MODEL_ID, config=config)
     bot.send_message(message.chat.id, "Память очищена!")
@@ -120,15 +139,30 @@ def handle_message(message):
         if message.content_type == 'text':
             user_text = message.text
             context = ""
-            triggers = ['?', 'курс', 'погода', 'сколько', 'акции', 'новости', 'что сейчас', 'какой', 'какая']
-            if any(t in user_text.lower() for t in triggers):
-                context = search_internet(user_text)
-            content_to_send.append(f"{time_prefix}{context}Ответь на вопрос пользователя: {user_text}")
+            
+            # --- ЛОГИКА ДЛЯ YOUTUBE ---
+            if "youtube.com" in user_text.lower() or "youtu.be" in user_text.lower():
+                bot.send_message(message.chat.id, "🎬 Вижу ссылку на YouTube! Изучаю видео, дай мне пару секунд...")
+                transcript = get_youtube_transcript(user_text)
+                
+                if transcript:
+                    context = f"[СУБТИТРЫ ВИДЕО]: {transcript}\n\n"
+                    # Меняем текст запроса, чтобы направить ИИ на пересказ, если пользователь просто кинул ссылку
+                    user_text = f"Опираясь на предоставленные субтитры, выполни просьбу: {user_text}. Если конкретной просьбы нет, просто сделай подробный пересказ этого видео, выдели главные мысли в виде красивого списка. Игнорируй рекламные интеграции."
+                else:
+                    context = "[ОШИБКА]: Не удалось вытащить субтитры. Возможно, автор отключил их для этого видео.\n\n"
+            
+            # --- ЛОГИКА ДЛЯ ПОИСКА (Если это не YouTube) ---
+            else:
+                triggers = ['?', 'курс', 'погода', 'сколько', 'акции', 'новости', 'что сейчас', 'какой', 'какая']
+                if any(t in user_text.lower() for t in triggers):
+                    context = search_internet(user_text)
+
+            content_to_send.append(f"{time_prefix}{context}Запрос пользователя: {user_text}")
 
         elif message.content_type == 'photo':
             file_info = bot.get_file(message.photo[-1].file_id)
             downloaded_file = bot.download_file(file_info.file_path)
-            # Новый способ передачи байтов
             content_to_send.append(genai_types.Part.from_bytes(data=downloaded_file, mime_type='image/jpeg'))
             content_to_send.append(time_prefix + (message.caption if message.caption else "Что на фото?"))
 
@@ -189,5 +223,5 @@ def handle_message(message):
             logging.error(f"Ошибка в handle_message: {e}")
             bot.send_message(message.chat.id, "Произошла ошибка, но я скоро поправлюсь!")
 
-print("Бот запущен (google-genai SDK + HTML + Файлы)...")
+print("Бот запущен (YouTube + SDK + HTML + Файлы)...")
 bot.infinity_polling()
